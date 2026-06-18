@@ -1,0 +1,20 @@
+﻿services:
+  gmail-viewer:
+    build: .
+    container_name: gmail-viewer
+    restart: unless-stopped
+    ports:
+      - "8000:8000"
+    environment:
+      APP_ACCESS_TOKEN: ${APP_ACCESS_TOKEN:-change-me}
+      GMAIL_CREDENTIALS_DIR: /app/gmail_credentials
+      HOST: 0.0.0.0
+      PORT: 8000
+      POLL_INTERVAL_SECONDS: ${POLL_INTERVAL_SECONDS:-0}
+      DEFAULT_GMAIL_QUERY: ${DEFAULT_GMAIL_QUERY:-newer_than:30d}
+      MAX_RESULTS_PER_ACCOUNT: ${MAX_RESULTS_PER_ACCOUNT:-20}
+      RECORD_LINK_WINDOW_SECONDS: ${RECORD_LINK_WINDOW_SECONDS:-180}
+    volumes:
+      - ./gmail_credentials:/app/gmail_credentials
+      - ./data:/app/data
+      - ./config:/app/config

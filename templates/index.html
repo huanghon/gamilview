@@ -1,0 +1,62 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>专用邮件链接生成工具</title>
+  <link rel="stylesheet" href="static/formatter.css?v=3">
+</head>
+<body>
+  <main class="formatter-shell">
+    <section class="hero">
+      <div>
+        <h1>专用邮件链接生成工具</h1>
+        <p>输入手机号，可选填写收件箱和发件人邮箱，生成专用链接读取匹配邮件正文。</p>
+      </div>
+      <button id="sampleBtn" class="ghost-button" type="button">填入示例</button>
+    </section>
+
+    <section class="workspace">
+      <div class="panel input-panel">
+        <div class="panel-head">
+          <h2>输入数据</h2>
+          <span>每行一组：手机号 [收件箱或 -] [发件人邮箱]，匹配标题+发件人</span>
+        </div>
+        <div class="config-row">
+          <label for="windowMinutes">仅获取最近</label>
+          <input id="windowMinutes" type="number" min="1" step="1" value="3">
+          <span>分钟内的邮件</span>
+          <label class="config-inline">
+            <input id="windowUnlimited" type="checkbox">
+            不限制时间（使用服务端默认）
+          </label>
+        </div>
+        <textarea id="sourceInput" spellcheck="false" placeholder="15663355&#10;15663355 ehdqja9179@gmail.com&#10;70200750 magic22dan@gmail.com&#10;70200038 - noreply@example.com&#10;70200038 gmail1 noreply@example.com"></textarea>
+        <div class="button-row">
+          <button id="generateBtn" type="button">生成链接</button>
+          <button id="clearBtn" class="secondary-button" type="button">清空</button>
+        </div>
+      </div>
+
+      <div class="panel output-panel">
+        <div class="panel-head">
+          <h2>生成结果</h2>
+          <span id="resultCount">0 条</span>
+        </div>
+        <textarea id="resultOutput" readonly spellcheck="false" placeholder="生成后的专用链接会显示在这里"></textarea>
+        <div class="button-row">
+          <button id="copyBtn" type="button">复制链接</button>
+          <span id="copyStatus" class="status-text"></span>
+        </div>
+      </div>
+    </section>
+
+    <section id="errorPanel" class="error-panel" hidden>
+      <h2>格式错误</h2>
+      <div id="errorList"></div>
+    </section>
+  </main>
+
+  <script src="static/formatter.js?v=3"></script>
+</body>
+</html>

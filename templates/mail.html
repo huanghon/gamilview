@@ -1,0 +1,52 @@
+<!doctype html>
+<html lang="zh-CN">
+<head>
+  <meta charset="utf-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1">
+  <title>{{ phone }} - Gmail 邮件</title>
+  <link rel="stylesheet" href="/static/app.css">
+</head>
+<body>
+  <main class="shell" data-token="{{ token }}" data-phone="{{ phone }}">
+    <section class="toolbar">
+      <div>
+        <a class="back-link" href="/?token={{ token }}">返回列表</a>
+        <h1>{{ phone }}</h1>
+        <p>最新匹配邮件和历史邮件列表。</p>
+      </div>
+      <div class="token-box">
+        <input id="tokenInput" type="password" placeholder="访问 token" value="{{ token }}">
+        <button id="saveTokenBtn" type="button">保存</button>
+      </div>
+    </section>
+
+    {% if app_token_is_default %}
+    <div class="notice">请先复制 .env.example 为 .env，并修改 APP_ACCESS_TOKEN。</div>
+    {% endif %}
+
+    <section class="actions">
+      <button id="refreshBtn" type="button">手动刷新</button>
+      <button id="reloadBtn" type="button">重新加载</button>
+      <span id="statusText"></span>
+    </section>
+
+    <section class="layout">
+      <aside class="panel list-panel">
+        <div class="panel-head">
+          <h2>最近邮件</h2>
+          <span id="mailCount">0</span>
+        </div>
+        <div id="mailList" class="mail-list"></div>
+      </aside>
+
+      <article class="panel detail-panel">
+        <div id="mailDetail" class="mail-detail empty">暂无邮件。请先手动刷新，或检查 Gmail 授权和关键词配置。</div>
+      </article>
+    </section>
+  </main>
+  <script src="/static/app.js"></script>
+  <script>
+    window.MailApp.initMail();
+  </script>
+</body>
+</html>

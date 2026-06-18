@@ -1,0 +1,14 @@
+.env
+data/
+gmail_credentials/
+__pycache__/
+*.pyc
+*.zip
+*.tar.gz
+*.exe
+GmailViewer/
+_build/
+_assets/
+.claude/
+.magi/
+.spec-workflow/

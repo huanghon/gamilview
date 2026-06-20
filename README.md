@@ -27,7 +27,7 @@ PORT=8000
   {
     "phone": "70200038",
     "record_url": "http://154.17.167.99/api/v1/smpp/record?token=xxx&format=txt2",
-    "gmail_accounts": ["gmail1", "gmail2", "gmail3"],
+    "gmail_accounts": ["all"],
     "keywords": ["70200038"],
     "enabled": true
   }
@@ -35,6 +35,8 @@ PORT=8000
 ```
 
 系统会用类似 `newer_than:30d 70200038` 的 Gmail 搜索语句读取邮件。也可以给单个配置增加 `gmail_query` 字段覆盖默认搜索。
+
+`gmail_accounts` 填 `["all"]` 时，会自动扫描 `gmail_credentials` 目录下已有 token 的账号。以后新增 `gmail4`、`gamil880` 等任意文件夹名，不需要再改代码或配置。
 
 ## Gmail 文件放置方式
 
@@ -51,6 +53,9 @@ gmail_credentials/
   gmail3/
     credentials.json
     token.json
+  gamil880/
+    credentials.json
+    token.json
 ```
 
 也支持平铺文件：
@@ -63,6 +68,8 @@ gmail_credentials/
   gmail2_token.json
   gmail3_credentials.json
   gmail3_token.json
+  gamil880_credentials.json
+  gamil880_token.json
 ```
 
 如果还没有 `token.json`，先放好 Google Cloud 下载的 OAuth 客户端文件，然后执行：
@@ -71,6 +78,7 @@ gmail_credentials/
 python -m gmail.client authorize gmail1 --dir .\gmail_credentials
 python -m gmail.client authorize gmail2 --dir .\gmail_credentials
 python -m gmail.client authorize gmail3 --dir .\gmail_credentials
+python -m gmail.client authorize gamil880 --dir .\gmail_credentials
 ```
 
 浏览器完成授权后会生成对应账号的 token 文件。
@@ -95,7 +103,7 @@ http://127.0.0.1:8000/
 60401656 gmail2
 ```
 
-如果只填写手机号，不填写邮箱账号，系统会按 `gmail1`、`gmail2`、`gmail3` 的顺序依次搜索标题中包含该手机号的最新邮件。
+如果只填写手机号，不填写邮箱账号，系统会自动扫描 `gmail_credentials` 下所有已有 token 的账号，并依次搜索标题中包含该手机号的最新邮件。
 
 第二列也可以直接填写邮箱地址，系统会自动映射到对应账号别名：
 

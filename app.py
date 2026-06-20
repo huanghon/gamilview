@@ -61,8 +61,8 @@ GMAIL_ACCOUNT_ALIASES = {
     "magic22dan@gmail.com": "gmail2",
     "chlqlrkfdl@gmail.com": "gmail3",
 }
-DEFAULT_GMAIL_ACCOUNTS = ["gmail1", "gmail2", "gmail3"]
 ALL_GMAIL_ACCOUNTS = "all"
+ALL_GMAIL_ACCOUNT_TOKENS = {"", "-", "*", ALL_GMAIL_ACCOUNTS}
 
 
 @asynccontextmanager
@@ -277,9 +277,67 @@ def build_phone_query(phone: str, sender: str = "", window_seconds: int | None =
     return " ".join(p for p in parts if p).strip()
 
 
+def natural_sort_key(value: str) -> list[tuple[int, Any]]:
+    parts: list[tuple[int, Any]] = []
+    current = ""
+    is_digit = False
+    for char in value:
+        char_is_digit = char.isdigit()
+        if current and char_is_digit != is_digit:
+            parts.append((0, int(current)) if is_digit else (1, current.lower()))
+            current = ""
+        current += char
+        is_digit = char_is_digit
+    if current:
+        parts.append((0, int(current)) if is_digit else (1, current.lower()))
+    return parts
+
+
+def discover_gmail_accounts(credentials_dir: str | Path | None = None) -> list[str]:
+    base = Path(credentials_dir or settings.gmail_credentials_dir)
+    if not base.exists():
+        return []
+
+    accounts: list[str] = []
+    seen: set[str] = set()
+
+    def add(account: str) -> None:
+        account = account.strip()
+        key = account.lower()
+        if account and key not in seen:
+            accounts.append(account)
+            seen.add(key)
+
+    for path in base.iterdir():
+        if path.is_dir() and (path / "token.json").is_file():
+            add(path.name)
+        elif path.is_file() and path.name.endswith("_token.json"):
+            add(path.name[: -len("_token.json")])
+        elif path.is_file() and path.name.startswith("token_") and path.suffix == ".json":
+            add(path.stem[len("token_") :])
+
+    return sorted(accounts, key=natural_sort_key)
+
+
+def resolve_gmail_accounts(
+    configured_accounts: Any,
+    credentials_dir: str | Path | None = None,
+) -> list[str]:
+    if isinstance(configured_accounts, str):
+        configured_accounts = [configured_accounts]
+    accounts = [
+        normalize_gmail_account(str(account))
+        for account in (configured_accounts or [])
+    ]
+    accounts = [account for account in accounts if account]
+    if not accounts or any(account.lower() in ALL_GMAIL_ACCOUNT_TOKENS for account in accounts):
+        return discover_gmail_accounts(credentials_dir)
+    return accounts
+
+
 def normalize_gmail_account(value: str) -> str:
     account = value.strip()
-    if not account:
+    if account.lower() in ALL_GMAIL_ACCOUNT_TOKENS:
         return ""
     return GMAIL_ACCOUNT_ALIASES.get(account.lower(), account)
 
@@ -341,7 +399,7 @@ def refresh_phone(phone: str) -> dict[str, Any]:
         raise HTTPException(status_code=404, detail=f"Phone config not found: {phone}")
 
     query = build_gmail_query(config)
-    accounts = config.get("gmail_accounts") or []
+    accounts = resolve_gmail_accounts(config.get("gmail_accounts"))
     if not accounts:
         raise HTTPException(status_code=400, detail=f"No Gmail accounts configured for {phone}")
 
@@ -438,7 +496,9 @@ def fetch_latest_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
         link_window = 0
     window_seconds = link_window if link_window > 0 else settings.record_link_window_seconds
     query = build_phone_query(phone, sender, window_seconds=window_seconds)
-    accounts = DEFAULT_GMAIL_ACCOUNTS if gmail_account == ALL_GMAIL_ACCOUNTS else [gmail_account]
+    accounts = resolve_gmail_accounts([] if gmail_account == ALL_GMAIL_ACCOUNTS else [gmail_account])
+    if not accounts:
+        raise HTTPException(status_code=400, detail="No Gmail accounts found")
     errors: list[str] = []
     cutoff = (
         datetime.now(timezone.utc) - timedelta(seconds=window_seconds)
@@ -546,6 +606,7 @@ def api_phones(_: str = Depends(require_token)) -> dict[str, Any]:
     for row in rows:
         item = dict(row)
         item["gmail_accounts"] = json.loads(item["gmail_accounts"])
+        item["resolved_gmail_accounts"] = resolve_gmail_accounts(item["gmail_accounts"])
         item["keywords"] = json.loads(item["keywords"])
         phones.append(item)
     return {"phones": phones}

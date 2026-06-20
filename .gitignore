@@ -8,7 +8,7 @@ __pycache__/
 *.exe
 GmailViewer/
 _build/
-_assets/
+
 .claude/
 .magi/
 .spec-workflow/

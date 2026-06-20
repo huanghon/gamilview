@@ -2,7 +2,7 @@
   {
     "phone": "70200038",
     "record_url": "http://154.17.167.99/api/v1/smpp/record?token=35245c0c5b6842ab9d908d2f25d22e69&format=txt2",
-    "gmail_accounts": ["gmail1", "gmail2", "gmail3"],
+    "gmail_accounts": ["all"],
     "keywords": ["70200038"],
     "enabled": true
   }

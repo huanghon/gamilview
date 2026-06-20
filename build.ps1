@@ -31,20 +31,30 @@ python -m PyInstaller `
   --hidden-import uvicorn.protocols.websockets.auto `
   --hidden-import uvicorn.lifespan.on `
   app.py
-if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed" }
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for app" }
+
+# 打包独立的授权工具
+python -m PyInstaller `
+  --noconfirm --clean `
+  --name gmail_authorize --onefile --console `
+  --distpath $DistDir --workpath $BuildDir --specpath $SpecDir `
+  gmail/client.py
+if ($LASTEXITCODE -ne 0) { throw "PyInstaller failed for gmail_authorize" }
 
 Write-Host "[3/5] assembling GmailViewer\..." -ForegroundColor Cyan
 New-Item -ItemType Directory -Force -Path $OutDir | Out-Null
 Copy-Item -Recurse -Force "$DistDir\app\*" $OutDir
+Copy-Item -Force "$DistDir\gmail_authorize.exe" $OutDir
 Copy-Item -Force ".env.example" $OutDir
 Copy-Item -Recurse -Force "config" $OutDir
 New-Item -ItemType Directory -Force -Path "$OutDir\gmail_credentials" | Out-Null
 New-Item -ItemType Directory -Force -Path "$OutDir\data" | Out-Null
 
 Write-Host "[4/5] writing launcher scripts..." -ForegroundColor Cyan
-Copy-Item -Force "_assets\start.bat"  "$OutDir\start.bat"
-Copy-Item -Force "_assets\stop.bat"   "$OutDir\stop.bat"
-Copy-Item -Force "_assets\README.txt" "$OutDir\README.txt"
+Copy-Item -Force "_assets\start.bat"     "$OutDir\start.bat"
+Copy-Item -Force "_assets\stop.bat"      "$OutDir\stop.bat"
+Copy-Item -Force "_assets\authorize.bat" "$OutDir\authorize.bat"
+Copy-Item -Force "_assets\README.txt"    "$OutDir\README.txt"
 
 Write-Host "[5/5] packing zip..." -ForegroundColor Cyan
 Compress-Archive -Path $OutDir -DestinationPath $ZipPath -Force

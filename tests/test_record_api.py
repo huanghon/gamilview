@@ -1,5 +1,7 @@
 from __future__ import annotations
 
+from pathlib import Path
+from tempfile import TemporaryDirectory
 import unittest
 
 from fastapi.testclient import TestClient
@@ -75,7 +77,7 @@ class RecordApiTests(unittest.TestCase):
                     INSERT INTO record_links (token, phone, gmail_account, sender, window_seconds, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    ("test-token-success", "16006329", "gmail1", "", 0, app.now_iso(), app.now_iso()),
+                    ("test-token-success", "16006329", "gmail1", "", 999999999, app.now_iso(), app.now_iso()),
                 )
             response = self.client.get("/api/v1/smpp/record?token=test-token-success&format=txt2")
             self.assertEqual(response.status_code, 200)
@@ -93,13 +95,29 @@ class RecordApiTests(unittest.TestCase):
                     INSERT INTO record_links (token, phone, gmail_account, sender, window_seconds, created_at, updated_at)
                     VALUES (?, ?, ?, ?, ?, ?, ?)
                     """,
-                    ("test-token-missing", "16006329", "gmail1", "", 0, app.now_iso(), app.now_iso()),
+                    ("test-token-missing", "16006329", "gmail1", "", 999999999, app.now_iso(), app.now_iso()),
                 )
             response = self.client.get("/api/v1/smpp/record?token=test-token-missing&format=txt2")
             self.assertEqual(response.status_code, 404)
             self.assertEqual(response.json()["detail"], "Code not found")
         finally:
             app.GmailAccountClient = original
+
+
+class GmailAccountDiscoveryTests(unittest.TestCase):
+    def test_all_accounts_are_discovered_from_token_folders(self) -> None:
+        with TemporaryDirectory() as temp_dir:
+            base = Path(temp_dir)
+            for account in ("gmail10", "gamil880", "gmail2"):
+                account_dir = base / account
+                account_dir.mkdir()
+                (account_dir / "token.json").write_text("{}", encoding="utf-8")
+            (base / "not-ready").mkdir()
+
+            self.assertEqual(
+                app.resolve_gmail_accounts(["all"], base),
+                ["gamil880", "gmail2", "gmail10"],
+            )
 
 
 if __name__ == "__main__":

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import argparse
+import json
 from pathlib import Path
 from typing import Any
 
@@ -63,7 +64,14 @@ class GmailAccountClient:
     def _build_service(self) -> Any:
         creds = None
         if self.token_path.exists():
-            creds = Credentials.from_authorized_user_file(str(self.token_path), SCOPES)
+            try:
+                creds = Credentials.from_authorized_user_file(str(self.token_path), SCOPES)
+            except json.JSONDecodeError as exc:
+                raise GmailClientError(
+                    f"Token file is empty or corrupted (invalid JSON) at {self.token_path}: {exc}"
+                ) from exc
+            except Exception as exc:
+                raise GmailClientError(f"Failed to read token file {self.token_path}: {exc}") from exc
 
         if creds and creds.expired and creds.refresh_token:
             try:
@@ -81,6 +89,11 @@ class GmailAccountClient:
 
         try:
             return build("gmail", "v1", credentials=creds, cache_discovery=False)
+        except json.JSONDecodeError as exc:
+            raise GmailClientError(
+                f"Google API Discovery returned an invalid JSON response. This usually happens "
+                f"when the network is blocked (e.g. inside China or behind a proxy/firewall returning HTML): {exc}"
+            ) from exc
         except Exception as exc:
             raise GmailClientError(f"Failed to build Gmail service for {self.account}: {exc}") from exc
 

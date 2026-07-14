@@ -4,14 +4,14 @@
   <meta charset="utf-8">
   <meta name="viewport" content="width=device-width, initial-scale=1">
   <title>专用邮件链接生成工具</title>
-  <link rel="stylesheet" href="static/formatter.css?v=3">
+  <link rel="stylesheet" href="static/formatter.css?v=4">
 </head>
 <body>
   <main class="formatter-shell">
     <section class="hero">
       <div>
-        <h1>专用邮件链接生成工具</h1>
-        <p>输入手机号，可选填写收件箱和发件人邮箱，生成专用链接读取匹配邮件正文。</p>
+        <h1>专用验证码链接生成工具</h1>
+        <p>输入手机号，生成专用链接读取最新验证码。Gmail 源可填收件箱/发件人；短信源第二列写 sms。</p>
       </div>
       <button id="sampleBtn" class="ghost-button" type="button">填入示例</button>
     </section>
@@ -20,18 +20,18 @@
       <div class="panel input-panel">
         <div class="panel-head">
           <h2>输入数据</h2>
-          <span>每行一组：手机号 [收件箱或 -] [发件人邮箱]，匹配标题+发件人</span>
+          <span>每行一组：手机号 [收件箱 / sms / -] [发件人邮箱]</span>
         </div>
         <div class="config-row">
           <label for="windowMinutes">仅获取最近</label>
           <input id="windowMinutes" type="number" min="1" step="1" value="3">
-          <span>分钟内的邮件</span>
+          <span>分钟内的记录</span>
           <label class="config-inline">
             <input id="windowUnlimited" type="checkbox">
             不限制时间（使用服务端默认）
           </label>
         </div>
-        <textarea id="sourceInput" spellcheck="false" placeholder="15663355&#10;15663355 ehdqja9179@gmail.com&#10;70200750 magic22dan@gmail.com&#10;70200038 - noreply@example.com&#10;70200038 gmail1 noreply@example.com"></textarea>
+        <textarea id="sourceInput" spellcheck="false" placeholder="15663355&#10;15663355 ehdqja9179@gmail.com&#10;70200750 magic22dan@gmail.com&#10;70200038 - noreply@example.com&#10;70200038 gmail1 noreply@example.com&#10;01080792425 sms"></textarea>
         <div class="button-row">
           <button id="generateBtn" type="button">生成链接</button>
           <button id="clearBtn" class="secondary-button" type="button">清空</button>
@@ -57,6 +57,6 @@
     </section>
   </main>
 
-  <script src="static/formatter.js?v=3"></script>
+  <script src="static/formatter.js?v=4"></script>
 </body>
 </html>

@@ -5,7 +5,10 @@
     "70200750 magic22dan@gmail.com",
     "70200038 - noreply@example.com",
     "70200038 gmail1 noreply@example.com",
+    "01080792425 sms",
   ];
+
+  const SMS_SOURCE_TOKENS = new Set(["sms", "sms_kr", "sms-source", "script"]);
 
   const INBOX_TOKENS = new Set([
     "gmail1", "gmail2", "gmail3",
@@ -14,6 +17,11 @@
     "chlqlrkfdl@gmail.com",
     "-", "all", "*",
   ]);
+
+  function isSmsSourceToken(value) {
+    if (!value) return false;
+    return SMS_SOURCE_TOKENS.has(String(value).toLowerCase());
+  }
 
   function isInboxToken(value) {
     if (!value) return false;
@@ -70,11 +78,14 @@
 
       let gmailAccount = "";
       let sender = "";
+      let source = "gmail";
 
       if (parts.length === 2) {
-        // 兼容老格式：第二列既可能是收件箱别名，也可能是发件人邮箱
+        // 兼容：第二列可能是 sms / 收件箱别名 / 发件人邮箱
         const second = parts[1];
-        if (isInboxToken(second)) {
+        if (isSmsSourceToken(second)) {
+          source = "sms";
+        } else if (isInboxToken(second)) {
           gmailAccount = normalizeInbox(second);
         } else if (second.includes("@")) {
           // 不是已知收件箱别名，但带 @ → 视为发件人邮箱
@@ -83,14 +94,25 @@
           gmailAccount = second;
         }
       } else if (parts.length === 3) {
-        gmailAccount = normalizeInbox(parts[1]);
-        sender = parts[2];
+        if (isSmsSourceToken(parts[1])) {
+          // 短信源不需要收件箱/发件人，第三列忽略
+          source = "sms";
+        } else {
+          gmailAccount = normalizeInbox(parts[1]);
+          sender = parts[2];
+        }
       } else if (parts.length > 3) {
-        errors.push(`第 ${index + 1} 行字段过多（最多 3 列：手机号 收件箱 发件人邮箱）：${line}`);
+        errors.push(`第 ${index + 1} 行字段过多（最多 3 列：手机号 收件箱/sms 发件人邮箱）：${line}`);
         return;
       }
 
-      items.push({ row: index + 1, phone, gmail_account: gmailAccount, sender });
+      items.push({
+        row: index + 1,
+        phone,
+        source,
+        gmail_account: source === "sms" ? "" : gmailAccount,
+        sender: source === "sms" ? "" : sender,
+      });
     });
 
     return { items, errors };
@@ -113,6 +135,7 @@
       headers: { "Content-Type": "application/json" },
       body: JSON.stringify({
         phone: item.phone,
+        source: item.source || "gmail",
         gmail_account: item.gmail_account,
         sender: item.sender,
         window_seconds: item.window_seconds,

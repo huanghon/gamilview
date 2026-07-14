@@ -74,10 +74,21 @@ class RecordApiTests(unittest.TestCase):
             with app.db() as conn:
                 conn.execute(
                     """
-                    INSERT INTO record_links (token, phone, gmail_account, sender, window_seconds, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO record_links (
+                        token, phone, gmail_account, sender, window_seconds, source, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    ("test-token-success", "16006329", "gmail1", "", 999999999, app.now_iso(), app.now_iso()),
+                    (
+                        "test-token-success",
+                        "16006329",
+                        "gmail1",
+                        "",
+                        999999999,
+                        "gmail",
+                        app.now_iso(),
+                        app.now_iso(),
+                    ),
                 )
             response = self.client.get("/api/v1/smpp/record?token=test-token-success&format=txt2")
             self.assertEqual(response.status_code, 200)
@@ -92,10 +103,21 @@ class RecordApiTests(unittest.TestCase):
             with app.db() as conn:
                 conn.execute(
                     """
-                    INSERT INTO record_links (token, phone, gmail_account, sender, window_seconds, created_at, updated_at)
-                    VALUES (?, ?, ?, ?, ?, ?, ?)
+                    INSERT INTO record_links (
+                        token, phone, gmail_account, sender, window_seconds, source, created_at, updated_at
+                    )
+                    VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
-                    ("test-token-missing", "16006329", "gmail1", "", 999999999, app.now_iso(), app.now_iso()),
+                    (
+                        "test-token-missing",
+                        "16006329",
+                        "gmail1",
+                        "",
+                        999999999,
+                        "gmail",
+                        app.now_iso(),
+                        app.now_iso(),
+                    ),
                 )
             response = self.client.get("/api/v1/smpp/record?token=test-token-missing&format=txt2")
             self.assertEqual(response.status_code, 404)

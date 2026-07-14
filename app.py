@@ -21,6 +21,11 @@ from fastapi.templating import Jinja2Templates
 from gmail.client import GmailAccountClient, GmailClientError
 from gmail.code_extractor import extract_verification_code
 from gmail.parser import parse_gmail_message
+from sms.client import (
+    DEFAULT_SMS_SCRIPT_URL,
+    SmsClientError,
+    fetch_latest_for_phone as fetch_latest_sms_for_phone,
+)
 
 
 # 兼容 PyInstaller 打包后的运行时路径
@@ -50,8 +55,13 @@ class Settings:
     poll_interval_seconds: int = int(os.getenv("POLL_INTERVAL_SECONDS", "0"))
     default_gmail_query: str = os.getenv("DEFAULT_GMAIL_QUERY", "newer_than:30d")
     max_results_per_account: int = int(os.getenv("MAX_RESULTS_PER_ACCOUNT", "20"))
-    # 专用链接（/api/v1/smpp/record）只拉取最近这么多秒内的邮件，默认 3 分钟
+    # 专用链接（/api/v1/smpp/record）只拉取最近这么多秒内的邮件/短信，默认 3 分钟
     record_link_window_seconds: int = int(os.getenv("RECORD_LINK_WINDOW_SECONDS", "180"))
+    # 短信源（Google Apps Script 表格）
+    sms_script_url: str = os.getenv("SMS_SCRIPT_URL", DEFAULT_SMS_SCRIPT_URL)
+    sms_cache_ttl_seconds: int = int(os.getenv("SMS_CACHE_TTL_SECONDS", "15"))
+    sms_request_timeout: float = float(os.getenv("SMS_REQUEST_TIMEOUT", "30"))
+    sms_timezone: str = os.getenv("SMS_TIMEZONE", "Asia/Seoul")
 
 
 settings = Settings()
@@ -63,6 +73,10 @@ GMAIL_ACCOUNT_ALIASES = {
 }
 ALL_GMAIL_ACCOUNTS = "all"
 ALL_GMAIL_ACCOUNT_TOKENS = {"", "-", "*", ALL_GMAIL_ACCOUNTS}
+SOURCE_GMAIL = "gmail"
+SOURCE_SMS = "sms"
+VALID_SOURCES = {SOURCE_GMAIL, SOURCE_SMS}
+SMS_SOURCE_TOKENS = {"sms", "sms_kr", "sms-source", "script"}
 
 
 @asynccontextmanager
@@ -153,17 +167,20 @@ def init_db() -> None:
                 gmail_account TEXT NOT NULL,
                 sender TEXT NOT NULL DEFAULT '',
                 window_seconds INTEGER NOT NULL DEFAULT 0,
+                source TEXT NOT NULL DEFAULT 'gmail',
                 created_at TEXT NOT NULL,
                 updated_at TEXT NOT NULL
             )
             """
         )
-        # 老库迁移：补 sender / window_seconds 列
+        # 老库迁移：补 sender / window_seconds / source 列
         cols = {row[1] for row in conn.execute("PRAGMA table_info(record_links)").fetchall()}
         if "sender" not in cols:
             conn.execute("ALTER TABLE record_links ADD COLUMN sender TEXT NOT NULL DEFAULT ''")
         if "window_seconds" not in cols:
             conn.execute("ALTER TABLE record_links ADD COLUMN window_seconds INTEGER NOT NULL DEFAULT 0")
+        if "source" not in cols:
+            conn.execute("ALTER TABLE record_links ADD COLUMN source TEXT NOT NULL DEFAULT 'gmail'")
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_emails_phone_received ON emails(phone, received_at DESC)"
         )
@@ -438,14 +455,26 @@ def refresh_all() -> dict[str, Any]:
     return {"results": results}
 
 
+def normalize_source(value: str | None) -> str:
+    source = str(value or SOURCE_GMAIL).strip().lower()
+    if source in SMS_SOURCE_TOKENS:
+        return SOURCE_SMS
+    if source in ("", SOURCE_GMAIL, "mail", "email"):
+        return SOURCE_GMAIL
+    if source in VALID_SOURCES:
+        return source
+    raise HTTPException(status_code=400, detail=f"Unsupported source: {value}")
+
+
 def create_record_link(
     phone: str,
-    gmail_account: str,
+    gmail_account: str = "",
     sender: str = "",
     window_seconds: int = 0,
+    source: str = SOURCE_GMAIL,
 ) -> dict[str, Any]:
     phone = phone.strip()
-    gmail_account = normalize_gmail_account(gmail_account)
+    source = normalize_source(source)
     sender = sender.strip()
     try:
         window_seconds = int(window_seconds or 0)
@@ -455,20 +484,30 @@ def create_record_link(
         window_seconds = 0
     if not phone:
         raise HTTPException(status_code=400, detail="Phone is required")
-    if not gmail_account:
-        gmail_account = ALL_GMAIL_ACCOUNTS
+
+    if source == SOURCE_SMS:
+        # 短信源不依赖 Gmail 账号；发件人字段忽略
+        gmail_account = ""
+        sender = ""
+    else:
+        gmail_account = normalize_gmail_account(gmail_account)
+        if not gmail_account:
+            gmail_account = ALL_GMAIL_ACCOUNTS
 
     token = secrets.token_hex(16)
     with db() as conn:
         conn.execute(
             """
-            INSERT INTO record_links (token, phone, gmail_account, sender, window_seconds, created_at, updated_at)
-            VALUES (?, ?, ?, ?, ?, ?, ?)
+            INSERT INTO record_links (
+                token, phone, gmail_account, sender, window_seconds, source, created_at, updated_at
+            )
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, phone, gmail_account, sender, window_seconds, now_iso(), now_iso()),
+            (token, phone, gmail_account, sender, window_seconds, source, now_iso(), now_iso()),
         )
     return {
         "phone": phone,
+        "source": source,
         "gmail_account": gmail_account,
         "sender": sender,
         "window_seconds": window_seconds,
@@ -485,16 +524,40 @@ def get_record_link(token: str) -> dict[str, Any] | None:
     return row_to_dict(row)
 
 
-def fetch_latest_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
-    phone = str(item["phone"])
-    gmail_account = str(item["gmail_account"])
-    sender = str(item.get("sender") or "").strip()
-    # 每个链接独立的时间窗口（秒）；为 0 时回退到全局默认
+def resolve_link_window_seconds(item: dict[str, Any]) -> int:
+    """每个链接独立的时间窗口（秒）；为 0 时回退到全局默认 RECORD_LINK_WINDOW_SECONDS。"""
     try:
         link_window = int(item.get("window_seconds") or 0)
     except (TypeError, ValueError):
         link_window = 0
-    window_seconds = link_window if link_window > 0 else settings.record_link_window_seconds
+    return link_window if link_window > 0 else settings.record_link_window_seconds
+
+
+def fetch_latest_sms_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
+    phone = str(item["phone"]).strip()
+    window_seconds = resolve_link_window_seconds(item)
+    try:
+        result = fetch_latest_sms_for_phone(
+            phone,
+            window_seconds=window_seconds,
+            url=settings.sms_script_url,
+            timeout=settings.sms_request_timeout,
+            cache_ttl_seconds=settings.sms_cache_ttl_seconds,
+            tz_name=settings.sms_timezone,
+        )
+    except LookupError as exc:
+        raise HTTPException(status_code=404, detail=str(exc)) from exc
+    except SmsClientError as exc:
+        add_fetch_log("error", str(exc), phone, SOURCE_SMS)
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return result
+
+
+def fetch_latest_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
+    phone = str(item["phone"])
+    gmail_account = str(item["gmail_account"])
+    sender = str(item.get("sender") or "").strip()
+    window_seconds = resolve_link_window_seconds(item)
     query = build_phone_query(phone, sender, window_seconds=window_seconds)
     accounts = resolve_gmail_accounts([] if gmail_account == ALL_GMAIL_ACCOUNTS else [gmail_account])
     if not accounts:
@@ -547,6 +610,7 @@ def fetch_latest_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
                 raise HTTPException(status_code=404, detail="Code not found")
             return {
                 "phone": phone,
+                "source": SOURCE_GMAIL,
                 "gmail_account": account,
                 "sender_filter": sender,
                 "message_id": str(parsed.get("message_id") or ""),
@@ -565,6 +629,13 @@ def fetch_latest_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
     if window_seconds and window_seconds > 0:
         detail += f" within last {window_seconds}s"
     raise HTTPException(status_code=404, detail=detail)
+
+
+def fetch_record_for_link(item: dict[str, Any]) -> dict[str, Any]:
+    source = str(item.get("source") or SOURCE_GMAIL).strip().lower()
+    if source == SOURCE_SMS:
+        return fetch_latest_sms_body_for_link(item)
+    return fetch_latest_body_for_link(item)
 
 
 async def poll_loop() -> None:
@@ -619,11 +690,19 @@ async def api_create_record_link(request: Request) -> dict[str, Any]:
     except Exception as exc:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
 
+    raw_source = payload.get("source")
+    # 兼容前端把 sms 写在 gmail_account 第二列的情况
+    gmail_account = str(payload.get("gmail_account", ""))
+    if raw_source is None and gmail_account.strip().lower() in SMS_SOURCE_TOKENS:
+        raw_source = gmail_account
+        gmail_account = ""
+
     item = create_record_link(
         phone=str(payload.get("phone", "")),
-        gmail_account=str(payload.get("gmail_account", "")),
+        gmail_account=gmail_account,
         sender=str(payload.get("sender", "")),
         window_seconds=int(payload.get("window_seconds") or 0),
+        source=str(raw_source or SOURCE_GMAIL),
     )
     base = str(request.base_url).rstrip("/")
     item["url"] = f"{base}/api/v1/smpp/record?token={item['token']}&format=txt2"
@@ -640,9 +719,9 @@ def api_record(token: str = "", format: str = "txt2"):
         raise HTTPException(status_code=404, detail="Record link not found")
 
     try:
-        result = fetch_latest_body_for_link(item)
+        result = fetch_record_for_link(item)
     except GmailClientError as exc:
-        add_fetch_log("error", str(exc), str(item["phone"]), str(item["gmail_account"]))
+        add_fetch_log("error", str(exc), str(item["phone"]), str(item.get("gmail_account") or ""))
         raise HTTPException(status_code=502, detail=str(exc)) from exc
 
     if format == "json":

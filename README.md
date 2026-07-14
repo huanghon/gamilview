@@ -16,6 +16,11 @@ APP_ACCESS_TOKEN=换成你自己的访问token
 GMAIL_CREDENTIALS_DIR=./gmail_credentials
 HOST=127.0.0.1
 PORT=8000
+RECORD_LINK_WINDOW_SECONDS=180
+SMS_SCRIPT_URL=https://script.google.com/macros/s/你的脚本/exec
+SMS_CACHE_TTL_SECONDS=15
+SMS_REQUEST_TIMEOUT=30
+SMS_TIMEZONE=Asia/Seoul
 ```
 
 ## 配置手机号/标识
@@ -125,9 +130,28 @@ chlqlrkfdl@gmail.com => gmail3
 
 ```text
 70200038----http://127.0.0.1:8000/api/v1/smpp/record?token=自动生成token&format=txt2
+01080792425----http://127.0.0.1:8000/api/v1/smpp/record?token=自动生成token&format=txt2
 ```
 
-访问这个链接时，系统会用该 token 对应的 Gmail 账号搜索标题中包含该手机号的最新邮件，并以纯文本返回邮件正文中提取出的验证码。
+访问这个链接时：
+
+- **Gmail 源**：用该 token 对应的 Gmail 账号搜索标题中包含该手机号的最新邮件，提取验证码
+- **短信源（sms）**：从 Google Apps Script 短信表按**手机号严格全等**取最新一条，韩文时间转成 `Asia/Seoul` ISO 后排序，提取验证码
+
+短信源生成方式与 Gmail 相同，第二列写 `sms`：
+
+```text
+01080792425 sms
+```
+
+或 API：
+
+```json
+POST /api/record-links
+{"phone":"01080792425","source":"sms","window_seconds":180}
+```
+
+时间窗口默认使用 `RECORD_LINK_WINDOW_SECONDS`（180 秒）；生成链接时可覆盖，前端「仅获取最近 N 分钟」同理。
 
 ## API
 

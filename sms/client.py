@@ -17,14 +17,15 @@ from .time_parser import parse_kr_received_time
 
 DEFAULT_SMS_SCRIPT_URL = (
     "https://script.google.com/macros/s/"
-    "AKfycbySwklPb6Cupzz8SayfcVAwZvho3Cl5CGBAGySDZeacfOUvQsH5tQSifQHy3QcFvLBEvw/exec"
+    "AKfycbzcqdDdQdma6ikRFDSJFPuPALPcwmGoSwuIKr8q1KUYyKynqAUi_9t0ARVPl2EKWod3/exec"
 )
 
-# Korean column headers from the Apps Script HTML table
-COL_RECEIVED = "받은시간"
-COL_PHONE = "전화번호"
-COL_BODY = "인증번호"
-COL_SIM = "SIM"
+# Korean column headers from the Apps Script HTML table.
+# Apps Script deployments vary the labels, so accept known aliases per column.
+COLS_RECEIVED = ("시간", "받은시간")  # time / received time
+COLS_PHONE = ("전화번호",)  # phone number
+COLS_BODY = ("문자내용", "인증번호")  # message content / verification body
+COLS_SIM = ("SIM",)  # SIM label
 
 
 class SmsClientError(RuntimeError):
@@ -69,6 +70,16 @@ def _decode_goog_script_payload(html: str) -> dict[str, Any]:
     return config
 
 
+def _pick_col(raw: dict[str, Any], names: tuple[str, ...]) -> str:
+    """Return the first non-empty cell among the candidate header names."""
+    for name in names:
+        if name in raw:
+            value = str(raw[name]).strip()
+            if value:
+                return value
+    return ""
+
+
 def extract_records_from_html(html: str, *, tz_name: str = "Asia/Seoul") -> list[dict[str, Any]]:
     """Parse the Apps Script HTML page into normalized SMS records."""
     config = _decode_goog_script_payload(html)
@@ -100,10 +111,10 @@ def extract_records_from_html(html: str, *, tz_name: str = "Asia/Seoul") -> list
         if len(cells) != len(headers):
             continue
         raw = dict(zip(headers, cells))
-        phone = str(raw.get(COL_PHONE, "")).strip()
-        body = str(raw.get(COL_BODY, "")).strip()
-        sim = str(raw.get(COL_SIM, "")).strip()
-        received_raw = str(raw.get(COL_RECEIVED, "")).strip()
+        phone = _pick_col(raw, COLS_PHONE)
+        body = _pick_col(raw, COLS_BODY)
+        sim = _pick_col(raw, COLS_SIM)
+        received_raw = _pick_col(raw, COLS_RECEIVED)
         if not phone or not body:
             continue
 

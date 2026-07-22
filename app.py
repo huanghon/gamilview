@@ -24,7 +24,10 @@ from gmail.parser import parse_gmail_message
 from sms.client import (
     DEFAULT_SMS_SCRIPT_URL,
     SmsClientError,
+    clear_cache as clear_sms_cache,
     fetch_latest_for_phone as fetch_latest_sms_for_phone,
+    fetch_latest_for_phone_multi as fetch_latest_sms_for_phone_multi,
+    inspect_source as inspect_sms_source,
 )
 
 
@@ -52,6 +55,20 @@ class Settings:
     )
     host: str = os.getenv("HOST", "127.0.0.1")
     port: int = int(os.getenv("PORT", "8000"))
+    # 可选：强制指定生成链接的域名。不配也能用，默认按当前访问 Host 生成 https 链接
+    public_base_url: str = (
+        os.getenv("PUBLIC_BASE_URL")
+        or os.getenv("RECORD_LINK_BASE_URL")
+        or os.getenv("BASE_URL")
+        or ""
+    ).strip().rstrip("/")
+    # 默认开启：生成的专用链接一律使用 https（线上 SSL 场景）
+    force_https_links: bool = os.getenv("FORCE_HTTPS_LINKS", "1").strip().lower() in {
+        "1",
+        "true",
+        "yes",
+        "on",
+    }
     poll_interval_seconds: int = int(os.getenv("POLL_INTERVAL_SECONDS", "0"))
     default_gmail_query: str = os.getenv("DEFAULT_GMAIL_QUERY", "newer_than:30d")
     max_results_per_account: int = int(os.getenv("MAX_RESULTS_PER_ACCOUNT", "20"))
@@ -77,6 +94,8 @@ SOURCE_GMAIL = "gmail"
 SOURCE_SMS = "sms"
 VALID_SOURCES = {SOURCE_GMAIL, SOURCE_SMS}
 SMS_SOURCE_TOKENS = {"sms", "sms_kr", "sms-source", "script"}
+SMS_REF_ALL = "all"
+SMS_REF_DEFAULT = "default"
 
 
 @asynccontextmanager
@@ -96,6 +115,43 @@ async def lifespan(_: FastAPI):
 app = FastAPI(title="Gmail Mail Viewer", version="1.0.0", lifespan=lifespan)
 templates = Jinja2Templates(directory=str(BUNDLE_DIR / "templates"))
 app.mount("/static", StaticFiles(directory=str(BUNDLE_DIR / "static")), name="static")
+
+
+def build_public_base_url(request: Request) -> str:
+    """Build absolute base URL for generated record links.
+
+    Default: always use https + current Host.
+    Optional override: PUBLIC_BASE_URL / RECORD_LINK_BASE_URL / BASE_URL.
+    Set FORCE_HTTPS_LINKS=0 only if you explicitly need http links.
+    """
+    configured = (settings.public_base_url or "").strip().rstrip("/")
+    if configured:
+        if configured.startswith("http://") and settings.force_https_links:
+            configured = "https://" + configured[len("http://") :]
+        elif (
+            not configured.startswith("http://")
+            and not configured.startswith("https://")
+        ):
+            scheme = "https" if settings.force_https_links else "http"
+            configured = f"{scheme}://{configured}"
+        return configured
+
+    forwarded_host = (request.headers.get("x-forwarded-host") or "").split(",")[0].strip()
+    host = forwarded_host or (request.headers.get("host") or "").strip()
+    if not host:
+        # Fallback: host from request.base_url
+        base = str(request.base_url).rstrip("/")
+        if "://" in base:
+            host = base.split("://", 1)[1]
+        else:
+            host = base
+
+    scheme = "https" if settings.force_https_links else (
+        (request.headers.get("x-forwarded-proto") or "").split(",")[0].strip()
+        or request.url.scheme
+        or "http"
+    )
+    return f"{scheme}://{host}".rstrip("/")
 
 
 def now_iso() -> str:
@@ -181,12 +237,31 @@ def init_db() -> None:
             conn.execute("ALTER TABLE record_links ADD COLUMN window_seconds INTEGER NOT NULL DEFAULT 0")
         if "source" not in cols:
             conn.execute("ALTER TABLE record_links ADD COLUMN source TEXT NOT NULL DEFAULT 'gmail'")
+        if "sms_source_ref" not in cols:
+            conn.execute(
+                "ALTER TABLE record_links ADD COLUMN sms_source_ref TEXT NOT NULL DEFAULT ''"
+            )
+        conn.execute(
+            """
+            CREATE TABLE IF NOT EXISTS sms_sources (
+                id INTEGER PRIMARY KEY AUTOINCREMENT,
+                name TEXT NOT NULL UNIQUE,
+                url TEXT NOT NULL,
+                enabled INTEGER NOT NULL DEFAULT 1,
+                is_default INTEGER NOT NULL DEFAULT 0,
+                note TEXT NOT NULL DEFAULT '',
+                created_at TEXT NOT NULL,
+                updated_at TEXT NOT NULL
+            )
+            """
+        )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_emails_phone_received ON emails(phone, received_at DESC)"
         )
         conn.execute(
             "CREATE INDEX IF NOT EXISTS idx_emails_message ON emails(message_id)"
         )
+    seed_sms_sources_from_env()
 
 
 def load_phone_configs() -> list[dict[str, Any]]:
@@ -455,14 +530,169 @@ def refresh_all() -> dict[str, Any]:
     return {"results": results}
 
 
+
+def row_sms_source(row: sqlite3.Row | None) -> dict[str, Any] | None:
+    item = row_to_dict(row)
+    if not item:
+        return None
+    item["enabled"] = bool(item.get("enabled"))
+    item["is_default"] = bool(item.get("is_default"))
+    return item
+
+
+def seed_sms_sources_from_env() -> None:
+    """If sms_sources is empty, import the legacy SMS_SCRIPT_URL as default source."""
+    url = (settings.sms_script_url or "").strip()
+    with db() as conn:
+        count = conn.execute("SELECT COUNT(*) AS c FROM sms_sources").fetchone()["c"]
+        if count:
+            return
+        if not url:
+            return
+        now = now_iso()
+        conn.execute(
+            """
+            INSERT INTO sms_sources (name, url, enabled, is_default, note, created_at, updated_at)
+            VALUES (?, ?, 1, 1, ?, ?, ?)
+            """,
+            ("default", url, "migrated from SMS_SCRIPT_URL", now, now),
+        )
+
+
+def list_sms_sources(*, enabled_only: bool = False) -> list[dict[str, Any]]:
+    sql = "SELECT * FROM sms_sources"
+    if enabled_only:
+        sql += " WHERE enabled = 1"
+    sql += " ORDER BY is_default DESC, id ASC"
+    with db() as conn:
+        rows = conn.execute(sql).fetchall()
+    return [row_sms_source(row) for row in rows]  # type: ignore[misc]
+
+
+def get_sms_source_by_id(source_id: int) -> dict[str, Any] | None:
+    with db() as conn:
+        row = conn.execute("SELECT * FROM sms_sources WHERE id = ?", (source_id,)).fetchone()
+    return row_sms_source(row)
+
+
+def get_sms_source_by_name(name: str) -> dict[str, Any] | None:
+    name = (name or "").strip()
+    if not name:
+        return None
+    with db() as conn:
+        row = conn.execute(
+            "SELECT * FROM sms_sources WHERE lower(name) = lower(?)",
+            (name,),
+        ).fetchone()
+    return row_sms_source(row)
+
+
+def get_default_sms_source() -> dict[str, Any] | None:
+    with db() as conn:
+        row = conn.execute(
+            """
+            SELECT * FROM sms_sources
+            WHERE enabled = 1 AND is_default = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+        if row:
+            return row_sms_source(row)
+        row = conn.execute(
+            """
+            SELECT * FROM sms_sources
+            WHERE enabled = 1
+            ORDER BY id ASC
+            LIMIT 1
+            """
+        ).fetchone()
+    return row_sms_source(row)
+
+
+def ensure_single_default(conn: sqlite3.Connection, source_id: int) -> None:
+    conn.execute("UPDATE sms_sources SET is_default = 0 WHERE id != ?", (source_id,))
+    conn.execute("UPDATE sms_sources SET is_default = 1 WHERE id = ?", (source_id,))
+
+
+def parse_sms_source_token(value: str | None) -> tuple[str, str]:
+    """Return (source, sms_source_ref).
+
+    Accepts:
+      sms / sms_kr / script
+      sms:all / sms:default / sms:源名
+    """
+    raw = str(value or "").strip()
+    if not raw:
+        return SOURCE_GMAIL, ""
+    lower = raw.lower()
+    if lower in SMS_SOURCE_TOKENS:
+        return SOURCE_SMS, ""
+    if lower.startswith("sms:"):
+        ref = raw.split(":", 1)[1].strip()
+        return SOURCE_SMS, ref
+    if lower.startswith("sms_"):
+        ref = raw[4:].strip(":_- ")
+        if ref:
+            return SOURCE_SMS, ref
+    return SOURCE_GMAIL, ""
+
+
+def normalize_sms_source_ref(value: str | None) -> str:
+    ref = str(value or "").strip()
+    if not ref:
+        return ""
+    lower = ref.lower()
+    if lower in {SMS_REF_DEFAULT, "def", "*"}:
+        return ""
+    if lower == SMS_REF_ALL:
+        return SMS_REF_ALL
+    return ref
+
+
+def resolve_sms_targets(sms_source_ref: str) -> tuple[str, list[dict[str, Any]]]:
+    """Resolve link ref into mode + source list.
+
+    mode: all | named | default | env
+    """
+    ref = normalize_sms_source_ref(sms_source_ref)
+    if ref and ref.lower() == SMS_REF_ALL:
+        sources = list_sms_sources(enabled_only=True)
+        if not sources:
+            url = (settings.sms_script_url or "").strip()
+            if url:
+                return "all", [{"id": 0, "name": "env", "url": url, "enabled": True, "is_default": True}]
+            raise HTTPException(status_code=400, detail="No enabled SMS sources configured")
+        return "all", sources
+
+    if ref:
+        source = get_sms_source_by_name(ref)
+        if not source and ref.isdigit():
+            source = get_sms_source_by_id(int(ref))
+        if not source:
+            raise HTTPException(status_code=400, detail=f"SMS source not found: {ref}")
+        if not source.get("enabled"):
+            raise HTTPException(status_code=400, detail=f"SMS source disabled: {ref}")
+        return "named", [source]
+
+    source = get_default_sms_source()
+    if source:
+        return "default", [source]
+    url = (settings.sms_script_url or "").strip()
+    if url:
+        return "env", [{"id": 0, "name": "env", "url": url, "enabled": True, "is_default": True}]
+    raise HTTPException(status_code=400, detail="No default SMS source configured")
+
+
 def normalize_source(value: str | None) -> str:
-    source = str(value or SOURCE_GMAIL).strip().lower()
-    if source in SMS_SOURCE_TOKENS:
+    raw = str(value or SOURCE_GMAIL).strip()
+    lower = raw.lower()
+    if lower in SMS_SOURCE_TOKENS or lower.startswith("sms:") or lower.startswith("sms_"):
         return SOURCE_SMS
-    if source in ("", SOURCE_GMAIL, "mail", "email"):
+    if lower in ("", SOURCE_GMAIL, "mail", "email"):
         return SOURCE_GMAIL
-    if source in VALID_SOURCES:
-        return source
+    if lower in VALID_SOURCES:
+        return lower
     raise HTTPException(status_code=400, detail=f"Unsupported source: {value}")
 
 
@@ -472,9 +702,9 @@ def create_record_link(
     sender: str = "",
     window_seconds: int = 0,
     source: str = SOURCE_GMAIL,
+    sms_source_ref: str = "",
 ) -> dict[str, Any]:
     phone = phone.strip()
-    source = normalize_source(source)
     sender = sender.strip()
     try:
         window_seconds = int(window_seconds or 0)
@@ -485,29 +715,62 @@ def create_record_link(
     if not phone:
         raise HTTPException(status_code=400, detail="Phone is required")
 
+    # Allow source="sms:all" / gmail_account="sms:源名" style tokens.
+    parsed_source, parsed_ref = parse_sms_source_token(source)
+    if parsed_source == SOURCE_SMS:
+        source = SOURCE_SMS
+        if not sms_source_ref:
+            sms_source_ref = parsed_ref
+    else:
+        ga_source, ga_ref = parse_sms_source_token(gmail_account)
+        if ga_source == SOURCE_SMS:
+            source = SOURCE_SMS
+            gmail_account = ""
+            if not sms_source_ref:
+                sms_source_ref = ga_ref
+        else:
+            source = normalize_source(source)
+
+    sms_source_ref = normalize_sms_source_ref(sms_source_ref)
+
     if source == SOURCE_SMS:
         # 短信源不依赖 Gmail 账号；发件人字段忽略
         gmail_account = ""
         sender = ""
+        # Validate ref early so bad names fail at link creation time.
+        resolve_sms_targets(sms_source_ref)
     else:
         gmail_account = normalize_gmail_account(gmail_account)
         if not gmail_account:
             gmail_account = ALL_GMAIL_ACCOUNTS
+        sms_source_ref = ""
 
     token = secrets.token_hex(16)
     with db() as conn:
         conn.execute(
             """
             INSERT INTO record_links (
-                token, phone, gmail_account, sender, window_seconds, source, created_at, updated_at
+                token, phone, gmail_account, sender, window_seconds, source,
+                sms_source_ref, created_at, updated_at
             )
-            VALUES (?, ?, ?, ?, ?, ?, ?, ?)
+            VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)
             """,
-            (token, phone, gmail_account, sender, window_seconds, source, now_iso(), now_iso()),
+            (
+                token,
+                phone,
+                gmail_account,
+                sender,
+                window_seconds,
+                source,
+                sms_source_ref,
+                now_iso(),
+                now_iso(),
+            ),
         )
     return {
         "phone": phone,
         "source": source,
+        "sms_source_ref": sms_source_ref or SMS_REF_DEFAULT,
         "gmail_account": gmail_account,
         "sender": sender,
         "window_seconds": window_seconds,
@@ -536,20 +799,36 @@ def resolve_link_window_seconds(item: dict[str, Any]) -> int:
 def fetch_latest_sms_body_for_link(item: dict[str, Any]) -> dict[str, Any]:
     phone = str(item["phone"]).strip()
     window_seconds = resolve_link_window_seconds(item)
+    # Legacy links have no sms_source_ref column value → default / env fallback.
+    sms_source_ref = str(item.get("sms_source_ref") or "").strip()
+    mode, sources = resolve_sms_targets(sms_source_ref)
     try:
-        result = fetch_latest_sms_for_phone(
-            phone,
-            window_seconds=window_seconds,
-            url=settings.sms_script_url,
-            timeout=settings.sms_request_timeout,
-            cache_ttl_seconds=settings.sms_cache_ttl_seconds,
-            tz_name=settings.sms_timezone,
-        )
+        if mode == "all" or len(sources) > 1:
+            result = fetch_latest_sms_for_phone_multi(
+                phone,
+                sources,
+                window_seconds=window_seconds,
+                timeout=settings.sms_request_timeout,
+                cache_ttl_seconds=settings.sms_cache_ttl_seconds,
+                tz_name=settings.sms_timezone,
+            )
+        else:
+            source = sources[0]
+            result = fetch_latest_sms_for_phone(
+                phone,
+                window_seconds=window_seconds,
+                url=str(source.get("url") or settings.sms_script_url),
+                timeout=settings.sms_request_timeout,
+                cache_ttl_seconds=settings.sms_cache_ttl_seconds,
+                tz_name=settings.sms_timezone,
+                source_name=str(source.get("name") or ""),
+            )
     except LookupError as exc:
         raise HTTPException(status_code=404, detail=str(exc)) from exc
     except SmsClientError as exc:
         add_fetch_log("error", str(exc), phone, SOURCE_SMS)
         raise HTTPException(status_code=502, detail=str(exc)) from exc
+    result["sms_query_mode"] = mode
     return result
 
 
@@ -691,11 +970,23 @@ async def api_create_record_link(request: Request) -> dict[str, Any]:
         raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
 
     raw_source = payload.get("source")
-    # 兼容前端把 sms 写在 gmail_account 第二列的情况
     gmail_account = str(payload.get("gmail_account", ""))
-    if raw_source is None and gmail_account.strip().lower() in SMS_SOURCE_TOKENS:
-        raw_source = gmail_account
-        gmail_account = ""
+    sms_source_ref = str(payload.get("sms_source") or payload.get("sms_source_ref") or "")
+
+    # 兼容前端把 sms / sms:all / sms:源名 写在 gmail_account 第二列
+    if raw_source is None:
+        parsed, ref = parse_sms_source_token(gmail_account)
+        if parsed == SOURCE_SMS:
+            raw_source = SOURCE_SMS
+            gmail_account = ""
+            if not sms_source_ref:
+                sms_source_ref = ref
+    else:
+        parsed, ref = parse_sms_source_token(str(raw_source))
+        if parsed == SOURCE_SMS:
+            raw_source = SOURCE_SMS
+            if not sms_source_ref:
+                sms_source_ref = ref
 
     item = create_record_link(
         phone=str(payload.get("phone", "")),
@@ -703,10 +994,177 @@ async def api_create_record_link(request: Request) -> dict[str, Any]:
         sender=str(payload.get("sender", "")),
         window_seconds=int(payload.get("window_seconds") or 0),
         source=str(raw_source or SOURCE_GMAIL),
+        sms_source_ref=sms_source_ref,
     )
-    base = str(request.base_url).rstrip("/")
+    base = build_public_base_url(request)
     item["url"] = f"{base}/api/v1/smpp/record?token={item['token']}&format=txt2"
     return item
+
+
+@app.get("/api/sms-sources")
+def api_list_sms_sources() -> dict[str, Any]:
+    return {"sources": list_sms_sources()}
+
+
+@app.post("/api/sms-sources")
+async def api_create_sms_source(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    name = str(payload.get("name") or "").strip()
+    url = str(payload.get("url") or "").strip()
+    note = str(payload.get("note") or "").strip()
+    enabled = 1 if payload.get("enabled", True) else 0
+    is_default = 1 if payload.get("is_default", False) else 0
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if name.lower() == SMS_REF_ALL:
+        raise HTTPException(status_code=400, detail=f"Reserved source name: {name}")
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    now = now_iso()
+    try:
+        with db() as conn:
+            if is_default:
+                conn.execute("UPDATE sms_sources SET is_default = 0")
+            # If this is the first source, force default.
+            count = conn.execute("SELECT COUNT(*) AS c FROM sms_sources").fetchone()["c"]
+            if count == 0:
+                is_default = 1
+            cur = conn.execute(
+                """
+                INSERT INTO sms_sources (name, url, enabled, is_default, note, created_at, updated_at)
+                VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (name, url, enabled, is_default, note, now, now),
+            )
+            source_id = int(cur.lastrowid)
+            if is_default:
+                ensure_single_default(conn, source_id)
+            row = conn.execute("SELECT * FROM sms_sources WHERE id = ?", (source_id,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=400, detail=f"Source name already exists: {name}") from exc
+
+    clear_sms_cache(url)
+    return row_sms_source(row)  # type: ignore[return-value]
+
+
+@app.put("/api/sms-sources/{source_id}")
+async def api_update_sms_source(source_id: int, request: Request) -> dict[str, Any]:
+    existing = get_sms_source_by_id(source_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="SMS source not found")
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    name = str(payload.get("name", existing["name"])).strip()
+    url = str(payload.get("url", existing["url"])).strip()
+    note = str(payload.get("note", existing.get("note") or "")).strip()
+    enabled = 1 if payload.get("enabled", existing["enabled"]) else 0
+    is_default = 1 if payload.get("is_default", existing["is_default"]) else 0
+    if not name:
+        raise HTTPException(status_code=400, detail="name is required")
+    if name.lower() == SMS_REF_ALL:
+        raise HTTPException(status_code=400, detail=f"Reserved source name: {name}")
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+    if not enabled and existing.get("is_default") and is_default:
+        raise HTTPException(status_code=400, detail="Cannot disable the default SMS source")
+
+    now = now_iso()
+    try:
+        with db() as conn:
+            if existing.get("is_default") and not is_default:
+                others = conn.execute(
+                    "SELECT id FROM sms_sources WHERE enabled = 1 AND id != ? ORDER BY id ASC LIMIT 1",
+                    (source_id,),
+                ).fetchone()
+                if not others:
+                    raise HTTPException(status_code=400, detail="At least one default SMS source is required")
+            if is_default:
+                conn.execute("UPDATE sms_sources SET is_default = 0")
+                enabled = 1
+            conn.execute(
+                """
+                UPDATE sms_sources
+                SET name = ?, url = ?, enabled = ?, is_default = ?, note = ?, updated_at = ?
+                WHERE id = ?
+                """,
+                (name, url, enabled, is_default, note, now, source_id),
+            )
+            if is_default:
+                ensure_single_default(conn, source_id)
+            row = conn.execute("SELECT * FROM sms_sources WHERE id = ?", (source_id,)).fetchone()
+    except sqlite3.IntegrityError as exc:
+        raise HTTPException(status_code=400, detail=f"Source name already exists: {name}") from exc
+
+    clear_sms_cache(str(existing.get("url") or ""))
+    clear_sms_cache(url)
+    return row_sms_source(row)  # type: ignore[return-value]
+
+
+@app.delete("/api/sms-sources/{source_id}")
+def api_delete_sms_source(source_id: int) -> dict[str, Any]:
+    existing = get_sms_source_by_id(source_id)
+    if not existing:
+        raise HTTPException(status_code=404, detail="SMS source not found")
+
+    with db() as conn:
+        enabled_count = conn.execute(
+            "SELECT COUNT(*) AS c FROM sms_sources WHERE enabled = 1"
+        ).fetchone()["c"]
+        if existing.get("is_default") and enabled_count <= 1:
+            if not (settings.sms_script_url or "").strip():
+                raise HTTPException(
+                    status_code=400,
+                    detail="Cannot delete the only default SMS source without SMS_SCRIPT_URL fallback",
+                )
+        conn.execute("DELETE FROM sms_sources WHERE id = ?", (source_id,))
+        default_row = conn.execute(
+            "SELECT id FROM sms_sources WHERE is_default = 1 LIMIT 1"
+        ).fetchone()
+        if not default_row:
+            other = conn.execute(
+                "SELECT id FROM sms_sources WHERE enabled = 1 ORDER BY id ASC LIMIT 1"
+            ).fetchone()
+            if other:
+                ensure_single_default(conn, int(other["id"]))
+
+    clear_sms_cache(str(existing.get("url") or ""))
+    return {"ok": True, "deleted_id": source_id}
+
+
+@app.post("/api/sms-sources/test")
+async def api_test_sms_source(request: Request) -> dict[str, Any]:
+    try:
+        payload = await request.json()
+    except Exception as exc:
+        raise HTTPException(status_code=400, detail="Invalid JSON body") from exc
+
+    url = str(payload.get("url") or "").strip()
+    source_id = payload.get("id")
+    if not url and source_id is not None:
+        source = get_sms_source_by_id(int(source_id))
+        if not source:
+            raise HTTPException(status_code=404, detail="SMS source not found")
+        url = str(source.get("url") or "")
+    if not url:
+        raise HTTPException(status_code=400, detail="url is required")
+
+    try:
+        info = inspect_sms_source(
+            url=url,
+            timeout=settings.sms_request_timeout,
+            tz_name=settings.sms_timezone,
+        )
+    except SmsClientError as exc:
+        raise HTTPException(status_code=502, detail=str(exc)) from exc
+    return info
 
 
 @app.get("/api/v1/smpp/record", name="api_record", response_model=None)

@@ -1,37 +1,101 @@
-<!doctype html>
+<!DOCTYPE html>
 <html lang="zh-CN">
 <head>
-  <meta charset="utf-8">
-  <meta name="viewport" content="width=device-width, initial-scale=1">
-  <title>专用邮件链接生成工具</title>
-  <link rel="stylesheet" href="static/formatter.css?v=4">
+  <meta charset="UTF-8">
+  <meta name="viewport" content="width=device-width, initial-scale=1.0">
+  <title>链接格式化工具</title>
+  <link rel="stylesheet" href="static/formatter.css?v=5">
 </head>
 <body>
   <main class="formatter-shell">
-    <section class="hero">
+    <header class="hero">
       <div>
-        <h1>专用验证码链接生成工具</h1>
-        <p>输入手机号，生成专用链接读取最新验证码。Gmail 源可填收件箱/发件人；短信源第二列写 sms。</p>
+        <h1>链接格式化工具</h1>
+        <p>支持 Gmail 与短信源。短信可管理多个页面源，也可用 all 查询全部页面并取最新验证码。</p>
       </div>
       <button id="sampleBtn" class="ghost-button" type="button">填入示例</button>
+    </header>
+
+    <section class="panel source-manager-panel">
+      <div class="panel-head">
+        <h2>SMS 数据源管理</h2>
+        <span id="sourceCount">0 个</span>
+      </div>
+      <p class="help-text">
+        可自行增加 / 修改 / 删除 Google Apps Script 表格页。生成链接时：
+        <code>手机号 sms</code> 用默认源，
+        <code>手机号 sms:源名</code> 用指定源，
+        <code>手机号 sms:all</code> 查全部启用源并取最新时间验证码。旧链接会自动走默认源。
+      </p>
+
+      <div class="source-form-grid">
+        <label>
+          <span>名称</span>
+          <input id="smsNameInput" type="text" placeholder="例如 page1" autocomplete="off">
+        </label>
+        <label class="span-2">
+          <span>URL</span>
+          <input id="smsUrlInput" type="url" placeholder="https://script.google.com/macros/s/.../exec" autocomplete="off">
+        </label>
+        <label>
+          <span>备注</span>
+          <input id="smsNoteInput" type="text" placeholder="可选" autocomplete="off">
+        </label>
+        <label class="check-label">
+          <input id="smsEnabledInput" type="checkbox" checked>
+          启用
+        </label>
+        <label class="check-label">
+          <input id="smsDefaultInput" type="checkbox">
+          设为默认
+        </label>
+      </div>
+      <div class="button-row">
+        <button id="smsSaveBtn" type="button">新增源</button>
+        <button id="smsResetBtn" class="secondary-button" type="button">重置表单</button>
+        <button id="smsTestBtn" class="secondary-button" type="button">测试连接</button>
+        <button id="smsReloadBtn" class="ghost-button" type="button">刷新列表</button>
+        <span id="smsFormStatus" class="status-text"></span>
+      </div>
+      <input id="smsEditId" type="hidden" value="">
+
+      <div class="table-wrap">
+        <table class="source-table">
+          <thead>
+            <tr>
+              <th>名称</th>
+              <th>URL</th>
+              <th>默认</th>
+              <th>启用</th>
+              <th>备注</th>
+              <th>操作</th>
+            </tr>
+          </thead>
+          <tbody id="smsSourceTableBody">
+            <tr>
+              <td colspan="6" class="empty-row">加载中…</td>
+            </tr>
+          </tbody>
+        </table>
+      </div>
     </section>
 
     <section class="workspace">
       <div class="panel input-panel">
         <div class="panel-head">
-          <h2>输入数据</h2>
-          <span>每行一组：手机号 [收件箱 / sms / -] [发件人邮箱]</span>
+          <h2>原始内容</h2>
+          <span>每行：手机号 [收件箱/sms/sms:源名/sms:all] [发件人邮箱]</span>
         </div>
         <div class="config-row">
           <label for="windowMinutes">仅获取最近</label>
-          <input id="windowMinutes" type="number" min="1" step="1" value="3">
+          <input id="windowMinutes" type="number" min="0" step="1" value="3">
           <span>分钟内的记录</span>
           <label class="config-inline">
             <input id="windowUnlimited" type="checkbox">
             不限制时间（使用服务端默认）
           </label>
         </div>
-        <textarea id="sourceInput" spellcheck="false" placeholder="15663355&#10;15663355 ehdqja9179@gmail.com&#10;70200750 magic22dan@gmail.com&#10;70200038 - noreply@example.com&#10;70200038 gmail1 noreply@example.com&#10;01080792425 sms"></textarea>
+        <textarea id="sourceInput" spellcheck="false" placeholder="15663355&#10;15663355 ehdqja9179@gmail.com&#10;70200750 magic22dan@gmail.com&#10;70200038 - noreply@example.com&#10;70200038 gmail1 noreply@example.com&#10;01080792425 sms&#10;01080792425 sms:all&#10;01080792425 sms:page1"></textarea>
         <div class="button-row">
           <button id="generateBtn" type="button">生成链接</button>
           <button id="clearBtn" class="secondary-button" type="button">清空</button>
@@ -57,6 +121,6 @@
     </section>
   </main>
 
-  <script src="static/formatter.js?v=4"></script>
+  <script src="static/formatter.js?v=5"></script>
 </body>
 </html>

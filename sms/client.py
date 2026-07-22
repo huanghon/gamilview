@@ -20,12 +20,57 @@ DEFAULT_SMS_SCRIPT_URL = (
     "AKfycbzcqdDdQdma6ikRFDSJFPuPALPcwmGoSwuIKr8q1KUYyKynqAUi_9t0ARVPl2EKWod3/exec"
 )
 
-# Korean column headers from the Apps Script HTML table.
-# Apps Script deployments vary the labels, so accept known aliases per column.
-COLS_RECEIVED = ("시간", "받은시간")  # time / received time
-COLS_PHONE = ("전화번호",)  # phone number
-COLS_BODY = ("문자내용", "인증번호")  # message content / verification body
-COLS_SIM = ("SIM",)  # SIM label
+# Column aliases: old headers + new headers + common English variants.
+COLS_RECEIVED = (
+    "시간",
+    "받은시간",
+    "수신시간",
+    "시간/날짜",
+    "날짜",
+    "수신",
+    "Time",
+    "Received",
+    "Received At",
+    "received_at",
+    "Date",
+    "Datetime",
+)
+COLS_PHONE = (
+    "전화번호",
+    "번호",
+    "휴대폰",
+    "핸드폰",
+    "전화",
+    "Phone",
+    "Phone Number",
+    "Tel",
+    "Mobile",
+    "phone",
+)
+COLS_BODY = (
+    "문자내용",
+    "인증번호",
+    "내용",
+    "메시지",
+    "메세지",
+    "문자",
+    "본문",
+    "Message",
+    "Body",
+    "Content",
+    "SMS",
+    "Text",
+)
+COLS_SIM = (
+    "SIM",
+    "sim",
+    "유심",
+    "이름",
+    "성명",
+    "Name",
+    "Label",
+    "Owner",
+)
 
 
 class SmsClientError(RuntimeError):
@@ -33,18 +78,16 @@ class SmsClientError(RuntimeError):
 
 
 _cache_lock = threading.Lock()
-_cache: dict[str, Any] = {
-    "url": "",
-    "fetched_at": 0.0,
-    "records": [],
-}
+# Per-URL cache so multiple sources do not overwrite each other.
+_cache_by_url: dict[str, dict[str, Any]] = {}
 
 
-def clear_cache() -> None:
+def clear_cache(url: str | None = None) -> None:
     with _cache_lock:
-        _cache["url"] = ""
-        _cache["fetched_at"] = 0.0
-        _cache["records"] = []
+        if url is None:
+            _cache_by_url.clear()
+            return
+        _cache_by_url.pop((url or "").strip(), None)
 
 
 def _decode_goog_script_payload(html: str) -> dict[str, Any]:
@@ -70,14 +113,62 @@ def _decode_goog_script_payload(html: str) -> dict[str, Any]:
     return config
 
 
+def _normalize_header(value: str) -> str:
+    return re.sub(r"\s+", "", str(value or "")).casefold()
+
+
+def _header_matches(header: str, aliases: tuple[str, ...]) -> bool:
+    h = _normalize_header(header)
+    if not h:
+        return False
+    for alias in aliases:
+        a = _normalize_header(alias)
+        if not a:
+            continue
+        if h == a or a in h or h in a:
+            return True
+    return False
+
+
 def _pick_col(raw: dict[str, Any], names: tuple[str, ...]) -> str:
-    """Return the first non-empty cell among the candidate header names."""
+    """Return the first non-empty cell among candidate header names / fuzzy matches."""
     for name in names:
         if name in raw:
             value = str(raw[name]).strip()
             if value:
                 return value
+    for key, cell in raw.items():
+        if _header_matches(str(key), names):
+            value = str(cell).strip()
+            if value:
+                return value
     return ""
+
+
+def map_headers(headers: list[str]) -> dict[str, str | None]:
+    """Map logical fields to the first matching real table header."""
+    mapping: dict[str, str | None] = {
+        "received": None,
+        "phone": None,
+        "body": None,
+        "sim": None,
+    }
+    alias_groups = {
+        "received": COLS_RECEIVED,
+        "phone": COLS_PHONE,
+        "body": COLS_BODY,
+        "sim": COLS_SIM,
+    }
+    used: set[str] = set()
+    for field, aliases in alias_groups.items():
+        for header in headers:
+            if header in used:
+                continue
+            if _header_matches(header, aliases):
+                mapping[field] = header
+                used.add(header)
+                break
+    return mapping
 
 
 def extract_records_from_html(html: str, *, tz_name: str = "Asia/Seoul") -> list[dict[str, Any]]:
@@ -139,6 +230,33 @@ def extract_records_from_html(html: str, *, tz_name: str = "Asia/Seoul") -> list
     return records
 
 
+def inspect_html(html: str, *, tz_name: str = "Asia/Seoul") -> dict[str, Any]:
+    """Inspect table headers and row count without raising on empty tables."""
+    config = _decode_goog_script_payload(html)
+    user_html = config.get("userHtml")
+    if not user_html:
+        raise SmsClientError("Apps Script payload missing userHtml")
+
+    soup = BeautifulSoup(str(user_html), "html.parser")
+    table = soup.find("table")
+    if table is None:
+        raise SmsClientError("Could not find the embedded table")
+
+    table_rows = table.find_all("tr")
+    headers = [
+        cell.get_text(" ", strip=True)
+        for cell in table_rows[0].find_all(["th", "td"])
+    ] if table_rows else []
+    mapping = map_headers(headers)
+    records = extract_records_from_html(html, tz_name=tz_name)
+    return {
+        "headers": headers,
+        "mapped_headers": mapping,
+        "record_count": len(records),
+        "ok": bool(mapping.get("phone") and mapping.get("body")),
+    }
+
+
 def fetch_records(
     *,
     url: str = DEFAULT_SMS_SCRIPT_URL,
@@ -149,18 +267,21 @@ def fetch_records(
 ) -> list[dict[str, Any]]:
     """Fetch and cache normalized SMS records from the Apps Script endpoint."""
     url = (url or DEFAULT_SMS_SCRIPT_URL).strip()
+    if not url:
+        raise SmsClientError("SMS source URL is required")
     ttl = max(0, int(cache_ttl_seconds or 0))
     now_ts = time.monotonic()
 
     with _cache_lock:
+        cached = _cache_by_url.get(url)
         if (
             not force_refresh
-            and _cache["url"] == url
-            and _cache["records"]
+            and cached
+            and cached.get("records") is not None
             and ttl > 0
-            and (now_ts - float(_cache["fetched_at"])) < ttl
+            and (now_ts - float(cached.get("fetched_at") or 0)) < ttl
         ):
-            return list(_cache["records"])
+            return list(cached["records"])
 
     try:
         response = requests.get(url, timeout=timeout)
@@ -171,34 +292,41 @@ def fetch_records(
     records = extract_records_from_html(response.text, tz_name=tz_name)
 
     with _cache_lock:
-        _cache["url"] = url
-        _cache["fetched_at"] = time.monotonic()
-        _cache["records"] = records
+        _cache_by_url[url] = {
+            "fetched_at": time.monotonic(),
+            "records": records,
+        }
 
     return list(records)
 
 
-def fetch_latest_for_phone(
+def inspect_source(
+    *,
+    url: str,
+    timeout: float = 30.0,
+    tz_name: str = "Asia/Seoul",
+) -> dict[str, Any]:
+    url = (url or "").strip()
+    if not url:
+        raise SmsClientError("SMS source URL is required")
+    try:
+        response = requests.get(url, timeout=timeout)
+        response.raise_for_status()
+    except requests.RequestException as exc:
+        raise SmsClientError(f"Failed to fetch SMS source: {exc}") from exc
+    info = inspect_html(response.text, tz_name=tz_name)
+    info["url"] = url
+    return info
+
+
+def _pick_latest_match(
     phone: str,
+    records: list[dict[str, Any]],
     *,
     window_seconds: int = 0,
-    url: str = DEFAULT_SMS_SCRIPT_URL,
-    timeout: float = 30.0,
-    cache_ttl_seconds: int = 15,
     tz_name: str = "Asia/Seoul",
     now: datetime | None = None,
 ) -> dict[str, Any]:
-    """Return the latest SMS verification code for an exact phone match."""
-    phone = (phone or "").strip()
-    if not phone:
-        raise SmsClientError("Phone is required")
-
-    records = fetch_records(
-        url=url,
-        timeout=timeout,
-        cache_ttl_seconds=cache_ttl_seconds,
-        tz_name=tz_name,
-    )
     matched = [item for item in records if item["phone"] == phone]
     if not matched:
         raise LookupError(f"No SMS found for {phone}")
@@ -230,4 +358,111 @@ def fetch_latest_for_phone(
         "received_at_raw": latest.get("received_at_raw") or "",
         "code": code,
         "body": latest.get("body") or "",
+        "source_name": latest.get("source_name") or "",
+        "source_url": latest.get("source_url") or "",
     }
+
+
+def fetch_latest_for_phone(
+    phone: str,
+    *,
+    window_seconds: int = 0,
+    url: str = DEFAULT_SMS_SCRIPT_URL,
+    timeout: float = 30.0,
+    cache_ttl_seconds: int = 15,
+    tz_name: str = "Asia/Seoul",
+    now: datetime | None = None,
+    source_name: str = "",
+) -> dict[str, Any]:
+    """Return the latest SMS verification code for an exact phone match."""
+    phone = (phone or "").strip()
+    if not phone:
+        raise SmsClientError("Phone is required")
+
+    records = fetch_records(
+        url=url,
+        timeout=timeout,
+        cache_ttl_seconds=cache_ttl_seconds,
+        tz_name=tz_name,
+    )
+    tagged = []
+    for item in records:
+        row = dict(item)
+        row["source_name"] = source_name
+        row["source_url"] = url
+        tagged.append(row)
+    return _pick_latest_match(
+        phone,
+        tagged,
+        window_seconds=window_seconds,
+        tz_name=tz_name,
+        now=now,
+    )
+
+
+def fetch_latest_for_phone_multi(
+    phone: str,
+    sources: list[dict[str, Any]],
+    *,
+    window_seconds: int = 0,
+    timeout: float = 30.0,
+    cache_ttl_seconds: int = 15,
+    tz_name: str = "Asia/Seoul",
+    now: datetime | None = None,
+) -> dict[str, Any]:
+    """Query multiple SMS pages and return the newest matching verification code."""
+    phone = (phone or "").strip()
+    if not phone:
+        raise SmsClientError("Phone is required")
+    if not sources:
+        raise SmsClientError("No SMS sources configured")
+
+    candidates: list[dict[str, Any]] = []
+    errors: list[str] = []
+
+    for source in sources:
+        url = str(source.get("url") or "").strip()
+        name = str(source.get("name") or "").strip()
+        if not url:
+            continue
+        try:
+            records = fetch_records(
+                url=url,
+                timeout=timeout,
+                cache_ttl_seconds=cache_ttl_seconds,
+                tz_name=tz_name,
+            )
+        except SmsClientError as exc:
+            errors.append(f"{name or url}: {exc}")
+            continue
+        for item in records:
+            if item["phone"] != phone:
+                continue
+            row = dict(item)
+            row["source_name"] = name
+            row["source_url"] = url
+            candidates.append(row)
+
+    if not candidates:
+        if errors:
+            raise SmsClientError("; ".join(errors))
+        raise LookupError(f"No SMS found for {phone}")
+
+    try:
+        result = _pick_latest_match(
+            phone,
+            candidates,
+            window_seconds=window_seconds,
+            tz_name=tz_name,
+            now=now,
+        )
+    except LookupError:
+        if errors:
+            raise LookupError(
+                f"No SMS found for {phone}; some sources failed: {'; '.join(errors)}"
+            ) from None
+        raise
+
+    result["queried_sources"] = len(sources)
+    result["source_errors"] = errors
+    return result

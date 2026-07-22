@@ -16,6 +16,8 @@ APP_ACCESS_TOKEN=换成你自己的访问token
 GMAIL_CREDENTIALS_DIR=./gmail_credentials
 HOST=127.0.0.1
 PORT=8000
+# PUBLIC_BASE_URL=https://xxxx.trycloudflare.com
+FORCE_HTTPS_LINKS=1
 RECORD_LINK_WINDOW_SECONDS=180
 SMS_SCRIPT_URL=https://script.google.com/macros/s/你的脚本/exec
 SMS_CACHE_TTL_SECONDS=15
@@ -138,17 +140,42 @@ chlqlrkfdl@gmail.com => gmail3
 - **Gmail 源**：用该 token 对应的 Gmail 账号搜索标题中包含该手机号的最新邮件，提取验证码
 - **短信源（sms）**：从 Google Apps Script 短信表按**手机号严格全等**取最新一条，韩文时间转成 `Asia/Seoul` ISO 后排序，提取验证码
 
-短信源生成方式与 Gmail 相同，第二列写 `sms`：
+### SMS 多数据源
+
+首页上方可直接 **增加 / 修改 / 删除** 多个 SMS 网页源（相同的 Apps Script 表格页结构）。
+
+- 首次启动若 `sms_sources` 表为空，会自动把 `.env` 里的 `SMS_SCRIPT_URL` 迁移为默认源 `default`
+- 旧版已生成的 `source=sms` 链接**无需重建**，会自动走当前默认源（没有默认源时回退 `SMS_SCRIPT_URL`）
+- 解析兼容旧表头与新表头（如 `시간/받은시간`、`문자내용/인증번호` 等）
+
+首页输入示例：
 
 ```text
 01080792425 sms
+01080792425 sms:default
+01080792425 sms:page1
+01080792425 sms:all
 ```
+
+说明：
+
+| 写法 | 行为 |
+|------|------|
+| `sms` / `sms:default` | 使用默认 SMS 源 |
+| `sms:源名` | 使用指定源 |
+| `sms:all` | 查询**全部启用源**；若同一手机号出现在多个页面，取**最新时间**的验证码 |
 
 或 API：
 
 ```json
 POST /api/record-links
 {"phone":"01080792425","source":"sms","window_seconds":180}
+
+POST /api/record-links
+{"phone":"01080792425","source":"sms:all"}
+
+POST /api/record-links
+{"phone":"01080792425","source":"sms","sms_source_ref":"page1"}
 ```
 
 时间窗口默认使用 `RECORD_LINK_WINDOW_SECONDS`（180 秒）；生成链接时可覆盖，前端「仅获取最近 N 分钟」同理。
@@ -159,6 +186,11 @@ POST /api/record-links
 POST /api/record-links
 GET  /api/v1/smpp/record?token=xxx&format=txt2
 GET  /api/v1/smpp/record?token=xxx&format=json
+GET  /api/sms-sources
+POST /api/sms-sources
+PUT  /api/sms-sources/{id}
+DELETE /api/sms-sources/{id}
+POST /api/sms-sources/test
 GET  /api/phones?token=xxx
 GET  /api/mail/70200038?token=xxx
 GET  /api/mails/70200038?token=xxx
